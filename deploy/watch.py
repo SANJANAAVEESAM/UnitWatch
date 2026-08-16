@@ -71,6 +71,7 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 # up, or the scraper broke and nobody noticed. These make the difference audible.
 FAILS_BEFORE_ALERT = 3          # consecutive bad runs before crying wolf
 HEARTBEAT_HOURS = 24            # a quiet "still watching" at most this often
+GAP_ALERT_MINUTES = 25          # report a silence longer than this on waking
 
 # Only Avalon can be filtered by date; see the module docstring.
 WINDOW_START = date(2026, 10, 10)
@@ -431,10 +432,46 @@ def maybe_heartbeat(state: dict) -> None:
     )
 
 
+def report_gap(state: dict) -> None:
+    """Say so if a long time passed since the last check.
+
+    A watcher cannot warn you while it is not running, and on a laptop that is
+    the likeliest failure by far — the lid closes and everything simply stops.
+    Silence then looks exactly like silence from a watcher that has found
+    nothing, which is the one thing this must never be confused with. So the
+    first run after a gap reports the gap.
+    """
+    last = state.get("_last_run")
+    now = datetime.now()
+    state["_last_run"] = now.isoformat(timespec="seconds")
+    if not last:
+        return
+    try:
+        gap = (now - datetime.fromisoformat(last)).total_seconds() / 60
+    except ValueError:
+        return
+    if gap < GAP_ALERT_MINUTES:
+        return
+    hours = gap / 60
+    span = f"{gap:.0f} minutes" if hours < 1.5 else f"{hours:.1f} hours"
+    log(f"gap since last check: {span}")
+    notify(
+        f"Unit watch was down for {span}",
+        "Nothing was checked in that time, so a unit could have been listed "
+        "and taken without you hearing about it.\n"
+        "Watching again now.",
+        priority="high",
+    )
+
+
 def main() -> int:
     state = load_state()
     first_run = not state
     changes: list[str] = []
+    if not first_run:
+        report_gap(state)
+    else:
+        state["_last_run"] = datetime.now().isoformat(timespec="seconds")
 
     # ---- Avalon -----------------------------------------------------------
     try:
