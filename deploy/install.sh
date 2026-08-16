@@ -20,11 +20,25 @@ apt-get update -qq
 apt-get install -y -qq python3 curl chromium ca-certificates fonts-liberation >/dev/null
 
 # Ubuntu ships chromium as a snap on some releases, which cannot run headless
-# from a system service. Fall back to the .deb from the chromium PPA if so.
+# from a system service. Fall back — but only on x86: Google publishes no ARM
+# build of Chrome for Linux, so on an ARM box the fallback would fail with a
+# confusing dpkg error rather than saying what is wrong.
 if ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null; then
-  echo "==> chromium missing, trying google-chrome-stable"
-  curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
-  apt-get install -y -qq /tmp/chrome.deb >/dev/null
+  ARCH=$(dpkg --print-architecture)
+  if [ "$ARCH" = "amd64" ]; then
+    echo "==> chromium missing, installing google-chrome-stable"
+    curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+    apt-get install -y -qq /tmp/chrome.deb >/dev/null
+  else
+    echo "==> chromium missing on $ARCH, trying snap"
+    snap install chromium >/dev/null 2>&1 || true
+    if ! command -v chromium >/dev/null; then
+      echo "!! No browser could be installed on $ARCH."
+      echo "!! Essex cannot be read without one. Try an x86 host, or install"
+      echo "!! chromium by hand and re-run."
+      exit 1
+    fi
+  fi
 fi
 
 # A 1GB free-tier box has no swap by default, and Chrome will be killed the
