@@ -107,8 +107,16 @@ def ping_alive() -> None:
     if not PING_URL:
         return
     try:
-        subprocess.run(["curl", "-sS", "-m", "15", "-o", "/dev/null", PING_URL],
-                       capture_output=True, timeout=25)
+        r = subprocess.run(
+            ["curl", "-sS", "-m", "15", "-o", "/dev/null", "-w", "%{http_code}", PING_URL],
+            capture_output=True, text=True, timeout=25)
+        code = (r.stdout or "").strip()
+        # Logged either way. A silent success is indistinguishable from a ping
+        # that never happened, and this is the one alarm with no other witness.
+        if code == "200":
+            log("  dead-man ping ok")
+        else:
+            log(f"  ! dead-man ping returned {code or 'nothing'}")
     except Exception as exc:  # noqa: BLE001
         log(f"  ! dead-man ping failed: {exc}")
 
