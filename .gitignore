@@ -1,0 +1,9 @@
+# The ntfy topic is the only secret here — anyone holding it can read every
+# alert or post fake ones. It lives beside the code, never in it.
+topic.txt
+
+# Machine state and output, meaningless in a repository and noisy in diffs.
+state.json
+*.log
+__pycache__/
+*.pyc
