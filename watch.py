@@ -70,7 +70,7 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 # Unattended for months, silence is ambiguous: it means either nothing has come
 # up, or the scraper broke and nobody noticed. These make the difference audible.
 FAILS_BEFORE_ALERT = 3          # consecutive bad runs before crying wolf
-HEARTBEAT_HOURS = 24            # a quiet "still watching" at most this often
+HEARTBEAT_HOUR = 8              # local hour for the daily "all well" report
 GAP_ALERT_MINUTES = 25          # report a silence longer than this on waking
 
 
@@ -455,59 +455,41 @@ def health(state: dict, key: str, name: str, ok: bool, detail: str = "") -> None
 
 
 def maybe_heartbeat(state: dict) -> None:
-    """A periodic sign of life, so long silences stay trustworthy."""
-    last = state.get("_heartbeat")
-    now = datetime.now()
-    if last:
-        try:
-            if (now - datetime.fromisoformat(last)).total_seconds() < HEARTBEAT_HOURS * 3600:
-                return
-        except ValueError:
-            pass
-    state["_heartbeat"] = now.isoformat(timespec="seconds")
-    counts = []
-    for key, label in (("avalon-meydenbauer", "Avalon"),
-                       ("essex-belcarra", "Belcarra"),
-                       ("essex-bellcentre", "Bellcentre")):
-        d = state.get(key) or {}
-        counts.append(f"{label} {d.get('total', 0)}")
-    notify(
-        "Still watching",
-        "Nothing new in the last day.\n" + " · ".join(counts) +
-        f"\nAvalon filtered to {WINDOW_START} – {WINDOW_END}.",
-        priority="low",
-    )
+    """Once a day, at a set hour, say everything is well and what it sees.
 
-
-def report_gap(state: dict) -> None:
-    """Say so if a long time passed since the last check.
-
-    A watcher cannot warn you while it is not running, and on a laptop that is
-    the likeliest failure by far — the lid closes and everything simply stops.
-    Silence then looks exactly like silence from a watcher that has found
-    nothing, which is the one thing this must never be confused with. So the
-    first run after a gap reports the gap.
+    Pinned to a clock hour rather than "24 hours since the last one", which
+    drifts a little further into the day every day until it arrives at an
+    unhelpful time. Sent by the first run at or after the hour, so if the
+    machine was off at eight it still reports when it wakes rather than
+    skipping the day.
     """
-    last = state.get("_last_run")
     now = datetime.now()
-    state["_last_run"] = now.isoformat(timespec="seconds")
-    if not last:
+    today = now.date().isoformat()
+    if now.hour < HEARTBEAT_HOUR or state.get("_heartbeat_day") == today:
         return
-    try:
-        gap = (now - datetime.fromisoformat(last)).total_seconds() / 60
-    except ValueError:
-        return
-    if gap < GAP_ALERT_MINUTES:
-        return
-    hours = gap / 60
-    span = f"{gap:.0f} minutes" if hours < 1.5 else f"{hours:.1f} hours"
-    log(f"gap since last check: {span}")
+    state["_heartbeat_day"] = today
+
+    lines = []
+    for key, label in (("avalon-meydenbauer", "Avalon Meydenbauer"),
+                       ("essex-belcarra", "Essex Belcarra"),
+                       ("essex-bellcentre", "Essex Bellcentre")):
+        d = state.get(key) or {}
+        hit = len(d.get("window_ids", []))
+        far = d.get("furthest")
+        # The horizon is the useful number: your window is only reachable once
+        # a community starts listing that far ahead.
+        tail = f", listed to {far}" if far and far != "?" else ""
+        lines.append(f"{label}: {d.get('total', 0)} units, {hit} matching{tail}")
+
+    bad = [k for k, v in (state.get("_health") or {}).items() if v.get("alerted")]
+    status = "All three readable." if not bad else f"PROBLEM with: {', '.join(bad)}"
+
     notify(
-        f"Unit watch was down for {span}",
-        "Nothing was checked in that time, so a unit could have been listed "
-        "and taken without you hearing about it.\n"
-        "Watching again now.",
-        priority="high",
+        "Watcher healthy",
+        status + "\n\n" + "\n".join(lines) +
+        f"\n\nWindow: {WINDOW_START} to {WINDOW_END}"
+        "\nExcluded: studios, 2bd/2ba, 3bd/2ba",
+        priority="low",
     )
 
 
@@ -550,7 +532,14 @@ def main() -> int:
                         url=u["url"],
                         priority="high",
                     )
-            state[AVALON["key"]] = {"window_ids": sorted(now_ids), "total": len(units)}
+            # The horizon matters as much as the count: a window in October is
+            # unreachable until a community starts listing that far ahead.
+            furthest = max((u["available"] for u in units if u["available"]), default="?")
+            state[AVALON["key"]] = {
+                "window_ids": sorted(now_ids),
+                "total": len(units),
+                "furthest": furthest,
+            }
     except Exception as exc:  # noqa: BLE001
         log(f"{AVALON['name']}: FAILED — {exc}")
         health(state, AVALON["key"], AVALON["name"], False, str(exc)[:200])
@@ -614,8 +603,9 @@ def main() -> int:
         log(f"pushed {len(changes)} alert(s): {', '.join(changes)}")
     else:
         log("nothing new")
-        maybe_heartbeat(state)
-        save_state(state)
+
+    maybe_heartbeat(state)
+    save_state(state)
 
     # Last thing, on every path: the run finished. Whatever it found, the
     # outside world now knows this is still alive.
