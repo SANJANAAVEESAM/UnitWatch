@@ -73,6 +73,75 @@ FAILS_BEFORE_ALERT = 3          # consecutive bad runs before crying wolf
 HEARTBEAT_HOUR = 8              # local hour for the daily "all well" report
 GAP_ALERT_MINUTES = 25          # report a silence longer than this on waking
 
+# Units worth waking up for. Each entry is a set of conditions that must all
+# hold; a unit matching any entry gets a loud alert instead of the usual one.
+#
+#   community  one of the keys below: avalon-meydenbauer, essex-belcarra,
+#              essex-bellcentre. Omit to mean any of them.
+#   unit       unit number, matched loosely: "417" finds "417" and "S-417".
+#   plan       floor plan name, matched loosely: "1G" finds "Plan 1G".
+#   max_rent   only if the rent is at or under this.
+#   min_sqft   only if it is at least this big.
+#   any_date   true to be told even when the move-in date is outside the
+#              window — for a unit wanted badly enough to negotiate around.
+#
+# Examples, left commented so nothing fires unintentionally:
+WATCHLIST: list[dict] = [
+    # {"community": "essex-belcarra", "plan": "1G"},
+    # {"unit": "417", "any_date": True},
+    # {"max_rent": 2600, "min_sqft": 700},
+]
+
+
+def starred(unit: dict, community: str) -> dict | None:
+    """The watchlist entry this unit satisfies, if any.
+
+    Names are compared loosely and case-insensitively because the two
+    landlords write them differently — Avalon's "AVB-WA018-00S-417" and
+    Essex's "C507" are both just a unit number to a person.
+    """
+    for entry in WATCHLIST:
+        if "community" in entry and entry["community"] != community:
+            continue
+        want_unit = str(entry.get("unit", "")).lower()
+        if want_unit and want_unit not in str(unit.get("label", "")).lower():
+            continue
+        want_plan = str(entry.get("plan", "")).lower()
+        if want_plan and want_plan not in str(unit.get("plan", "")).lower():
+            continue
+        if "max_rent" in entry:
+            try:
+                if float(unit.get("price") or 1e9) > float(entry["max_rent"]):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if "min_sqft" in entry:
+            try:
+                if float(unit.get("sqft") or 0) < float(entry["min_sqft"]):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        return entry
+    return None
+
+
+def alertable(units: list[dict], community: str) -> list[tuple[dict, dict | None]]:
+    """Which units deserve a notification, each with its watchlist entry.
+
+    Normally that means inside the move-in window and not an excluded layout.
+    A starred entry marked any_date overrides both — if you have said you want
+    that specific flat, a date two weeks out is your problem to solve, not a
+    reason to stay quiet.
+    """
+    out = []
+    for u in units:
+        star = starred(u, community)
+        if star and star.get("any_date"):
+            out.append((u, star))
+        elif in_window(u["available"]) and wanted(u["beds"], u["baths"]):
+            out.append((u, star))
+    return out
+
 
 def _ping_url() -> str | None:
     """A dead-man's switch, if one is configured.
@@ -544,25 +613,26 @@ def main() -> int:
                    "The page loaded but no units could be parsed.")
         else:
             health(state, AVALON["key"], AVALON["name"], True)
+            picks = alertable(units, AVALON["key"])
             in_win = [u for u in units if in_window(u["available"])]
-            matching = [u for u in in_win if wanted(u["beds"], u["baths"])]
-            skipped = len(in_win) - len(matching)
-            log(f"{AVALON['name']}: {len(units)} units, {len(in_win)} in window"
-                + (f", {skipped} excluded by layout" if skipped else ""))
+            log(f"{AVALON['name']}: {len(units)} units, {len(picks)} alertable "
+                f"({len(in_win)} in window)")
 
             prev = set(state.get(AVALON["key"], {}).get("window_ids", []))
-            now_ids = {u["id"] for u in matching}
-            fresh = [u for u in matching if u["id"] not in prev]
+            now_ids = {u["id"] for u, _ in picks}
+            fresh = [(u, star) for u, star in picks if u["id"] not in prev]
 
             if fresh and not first_run:
-                for u in fresh:
+                for u, star in fresh:
                     changes.append(f"{AVALON['name']} · {u['label']}")
                     notify(
-                        f"{AVALON['name']} — {u['label']} available {u['available']}",
+                        ("\u2605 " if star else "")
+                        + f"{AVALON['name']} — {u['label']} available {u['available']}",
                         f"{u['plan']} · {u['beds']}bd/{u['baths']}ba · {u['sqft']} sqft\n"
-                        f"${u['price']}/mo · move-in {u['available']}",
+                        f"${u['price']}/mo · move-in {u['available']}"
+                        + ("\nOn your watchlist." if star else ""),
                         url=u["url"],
-                        priority="high",
+                        priority="max" if star else "high",
                     )
             # The horizon matters as much as the count: a window in October is
             # unreachable until a community starts listing that far ahead.
@@ -593,26 +663,27 @@ def main() -> int:
                 continue
             health(state, prop["key"], prop["name"], True)
 
-            in_win = [u for u in units if in_window(u["available"])]
-            matching = [u for u in in_win if wanted(u["beds"], u["baths"])]
+            picks = alertable(units, prop["key"])
             furthest = max((u["available"] for u in units if u["available"]), default="?")
-            log(f"{prop['name']}: {len(units)} units, {len(matching)} in window "
+            log(f"{prop['name']}: {len(units)} units, {len(picks)} alertable "
                 f"(listed out to {furthest})")
 
             prev = set(state.get(prop["key"], {}).get("window_ids", []))
-            fresh = [u for u in matching if u["id"] not in prev]
+            fresh = [(u, star) for u, star in picks if u["id"] not in prev]
             if fresh and not first_run:
-                for u in fresh:
+                for u, star in fresh:
                     changes.append(f"{prop['name']} · {u['label']}")
                     notify(
-                        f"{prop['name']} — {u['label']} available {u['available']}",
+                        ("\u2605 " if star else "")
+                        + f"{prop['name']} — {u['label']} available {u['available']}",
                         f"{u['plan']} · {u['beds']}bd/{u['baths']}ba · {u['sqft']} sqft\n"
-                        f"from ${u['price']}/mo · move-in {u['available']}",
+                        f"from ${u['price']}/mo · move-in {u['available']}"
+                        + ("\nOn your watchlist." if star else ""),
                         url=prop["url"],
-                        priority="high",
+                        priority="max" if star else "high",
                     )
             state[prop["key"]] = {
-                "window_ids": sorted(u["id"] for u in matching),
+                "window_ids": sorted(u["id"] for u, _ in picks),
                 "total": len(units),
                 "furthest": furthest,
             }
