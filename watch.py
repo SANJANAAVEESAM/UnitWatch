@@ -87,9 +87,16 @@ GAP_ALERT_MINUTES = 25          # report a silence longer than this on waking
 #
 # Examples, left commented so nothing fires unintentionally:
 WATCHLIST: list[dict] = [
-    # {"community": "essex-belcarra", "plan": "1G"},
-    # {"unit": "417", "any_date": True},
-    # {"max_rent": 2600, "min_sqft": 700},
+    # Belcarra. The real names carry suffixes — 1H, 1I and 1L are lofts — and
+    # prefix matching finds them without needing the suffix written out.
+    {"community": "essex-belcarra", "plan": "1H"},
+    {"community": "essex-belcarra", "plan": "1I"},
+    {"community": "essex-belcarra", "plan": "1J"},
+    {"community": "essex-belcarra", "plan": "1K"},
+    {"community": "essex-belcarra", "plan": "1L"},
+    # Bellcentre.
+    {"community": "essex-bellcentre", "plan": "1G"},
+    {"community": "essex-bellcentre", "plan": "1F + Den"},
 ]
 
 
@@ -106,9 +113,15 @@ def starred(unit: dict, community: str) -> dict | None:
         want_unit = str(entry.get("unit", "")).lower()
         if want_unit and want_unit not in str(unit.get("label", "")).lower():
             continue
-        want_plan = str(entry.get("plan", "")).lower()
-        if want_plan and want_plan not in str(unit.get("plan", "")).lower():
-            continue
+        want_plan = str(entry.get("plan", "")).lower().removeprefix("plan ").strip()
+        if want_plan:
+            have = str(unit.get("plan", "")).lower().removeprefix("plan ").strip()
+            # Anchored at the start, not a substring search. These names are
+            # numbered so that plain containment misfires: "1A" appears inside
+            # "21A Loft", a two-bedroom. Prefix matching still lets "1H" find
+            # "1H Loft" while refusing "21H".
+            if not (have == want_plan or have.startswith(want_plan + " ")):
+                continue
         if "max_rent" in entry:
             try:
                 if float(unit.get("price") or 1e9) > float(entry["max_rent"]):
