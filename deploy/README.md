@@ -5,19 +5,37 @@ whether or not any laptop is awake.
 
 ## What you need
 
-A small Ubuntu 22.04/24.04 box. **2 GB of RAM**, because Chrome is required to
-read the Essex pages — Avalon is plain HTTP and would run anywhere.
+A small Ubuntu 22.04/24.04 box. Chrome is required for the Essex pages, and
+measures about 250 MB for the parent process plus renderers — so **1 GB works**
+with the swap the installer adds. Avalon is plain HTTP and would run anywhere.
 
 Cheapest that comfortably works:
 
 | Host | Spec | Cost |
 |---|---|---|
+| Google Cloud e2-micro | 1 vCPU / 1 GB | **free forever** (us-west1/central1/east1) |
+| Oracle Cloud Always Free | 4 ARM / 24 GB | **free forever**, if capacity allows |
 | Hetzner CAX11 (ARM) | 2 vCPU / 4 GB | ~€3.29/mo |
 | Hetzner CX22 | 2 vCPU / 4 GB | ~€4.50/mo |
 | AWS Lightsail | 1 GB | $5/mo |
 | Oracle Cloud Always Free | 4 ARM / 24 GB | free, if you can get capacity |
 
 Bandwidth is about 20 GB/month, which every one of these includes many times over.
+
+## Check the host first
+
+The one thing that cannot be tested from a laptop is whether the host's IP is
+allowed to read Essex. Their bot check judges the network as well as the
+browser, and cloud address ranges are treated more harshly than home
+connections — a real Chrome on a distrusted IP still gets nothing.
+
+    scp check-host.sh root@YOUR_SERVER_IP:/root/
+    ssh root@YOUR_SERVER_IP
+    bash check-host.sh
+
+It takes a minute and installs only chromium and curl. If Essex says FAIL,
+do not bother installing — split the job instead: Avalon needs no browser and
+runs anywhere, Essex stays on a home connection.
 
 ## Install
 
