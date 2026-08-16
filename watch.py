@@ -17,10 +17,15 @@ Layouts on EXCLUDED_LAYOUTS are dropped before any of that, so they never
 reach a notification.
 
   Essex     — sits behind Vercel's bot check, so it needs a real browser engine
-              to load at all, and even then the page only publishes per-floorplan
-              counts and rent ranges. There are no per-unit dates to read. So
-              Essex alerts fire when a floorplan's count rises, and tell you to
-              look. Better a nudge without a date than silence.
+              to reach anything. Behind that it has a proper availability API,
+              found by logging what its own page requests, and that returns a
+              per-unit availability_date. So Essex is filtered by date too.
+
+              Its date parameters turn out to affect pricing, not which units
+              come back: asking for December returns exactly what asking for
+              October does. Essex simply does not list further than about sixty
+              days out, so a unit free in October appears only once someone
+              gives notice. Which is the whole reason to keep watching.
 
 No third-party packages. Fetching uses the Chrome already on this Mac, because
 both sites need JavaScript and one of them needs a browser fingerprint.
@@ -125,14 +130,29 @@ ESSEX = [
     {
         "key": "essex-belcarra",
         "name": "Essex Belcarra",
+        "property_id": "510860",
         "url": "https://www.essexapartmenthomes.com/apartments/bellevue/belcarra/floor-plans-and-pricing",
     },
     {
         "key": "essex-bellcentre",
         "name": "Essex Bellcentre",
+        "property_id": "510867",
         "url": "https://www.essexapartmenthomes.com/apartments/bellevue/bellcentre/floor-plans-and-pricing",
     },
 ]
+
+
+def essex_api(property_id: str) -> str:
+    """Essex's own availability endpoint.
+
+    The range is asked for generously even though it makes no difference to
+    which units come back — Essex lists about sixty days ahead regardless. It
+    costs nothing and means the day they extend that horizon, this sees it.
+    """
+    start = date.today().isoformat()
+    end = date.today().replace(year=date.today().year + 1).isoformat()
+    return (f"https://www.essexapartmenthomes.com/api/properties/{property_id}"
+            f"/availability?start_date={start}&end_date={end}&format=spa")
 
 
 def log(msg: str) -> None:
@@ -279,39 +299,34 @@ def in_window(iso: str | None) -> bool:
 # --------------------------------------------------------------------------
 
 
-def parse_essex(html: str) -> dict[str, dict]:
-    """Floorplan name -> count and rent range.
+def parse_essex(dom: str) -> list[dict]:
+    """Units from the availability API.
 
-    The payload is embedded inside a JavaScript string, so every quote in it
-    arrives escaped and has to be unescaped before it is JSON again.
+    Chrome renders a JSON response inside a <pre>, with the entities escaped,
+    so it has to be dug back out rather than parsed straight.
     """
-    txt = html.replace('\\"', '"').replace("\\\\", "\\")
-    i = txt.find('"floorplans":[')
-    if i == -1:
-        return {}
-    span = balanced(txt, txt.index("[", i), "[", "]")
-    if not span:
-        return {}
+    m = re.search(r"<pre[^>]*>(.*?)</pre>", dom, re.S)
+    body = (m.group(1) if m else dom)
+    body = (body.replace("&quot;", '"').replace("&amp;", "&")
+                .replace("&lt;", "<").replace("&gt;", ">")).strip()
     try:
-        plans = json.loads(span)
-    except json.JSONDecodeError:
-        return {}
+        units = json.loads(body)["result"]["units"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return []
 
-    out: dict[str, dict] = {}
-    for p in plans:
-        count = p.get("available_units_count") or 0
-        if not count:
-            continue
-        if not wanted(p.get("beds"), p.get("baths")):
-            continue
-        out[str(p.get("name"))] = {
-            "count": count,
-            "beds": p.get("beds"),
-            "baths": p.get("baths"),
-            "sqft": p.get("minimum_sqft"),
-            "rent_low": p.get("minimum_rent"),
-            "rent_high": p.get("maximum_rent"),
-        }
+    out = []
+    for u in units:
+        raw = u.get("availability_date") or ""
+        out.append({
+            "id": str(u.get("unit_id")),
+            "label": u.get("name"),
+            "plan": u.get("floorplan_name"),
+            "beds": u.get("beds"),
+            "baths": u.get("baths"),
+            "sqft": u.get("sqft"),
+            "price": u.get("minimum_rent"),
+            "available": raw[:10] or None,
+        })
     return out
 
 
@@ -459,33 +474,43 @@ def main() -> int:
     # ---- Essex ------------------------------------------------------------
     for prop in ESSEX:
         try:
-            html = fetch_browser(prop["url"])
-            plans = parse_essex(html)
-            total = sum(p["count"] for p in plans.values())
-            if not plans and "Security Checkpoint" in html:
+            dom = fetch_browser(essex_api(prop["property_id"]), budget_ms=20000)
+            if "Security Checkpoint" in dom:
                 log(f"{prop['name']}: blocked by the bot check this run")
                 health(state, prop["key"], prop["name"], False,
                        "Blocked by the site's bot check.")
                 continue
+            units = parse_essex(dom)
+            if not units:
+                log(f"{prop['name']}: API returned no units — shape may have changed")
+                health(state, prop["key"], prop["name"], False,
+                       "The availability API returned nothing parseable.")
+                continue
             health(state, prop["key"], prop["name"], True)
-            log(f"{prop['name']}: {total} available across {len(plans)} floorplans")
 
-            prev_plans = state.get(prop["key"], {}).get("plans", {})
-            for name, info in sorted(plans.items()):
-                before = (prev_plans.get(name) or {}).get("count", 0)
-                if info["count"] > before and not first_run:
-                    added = info["count"] - before
-                    changes.append(f"{prop['name']} · {name}")
+            in_win = [u for u in units if in_window(u["available"])]
+            matching = [u for u in in_win if wanted(u["beds"], u["baths"])]
+            furthest = max((u["available"] for u in units if u["available"]), default="?")
+            log(f"{prop['name']}: {len(units)} units, {len(matching)} in window "
+                f"(listed out to {furthest})")
+
+            prev = set(state.get(prop["key"], {}).get("window_ids", []))
+            fresh = [u for u in matching if u["id"] not in prev]
+            if fresh and not first_run:
+                for u in fresh:
+                    changes.append(f"{prop['name']} · {u['label']}")
                     notify(
-                        f"{prop['name']} — {name}: {added} new",
-                        f"{info['beds']}bd/{info['baths']}ba · {info['sqft']} sqft\n"
-                        f"${info['rent_low']}–${info['rent_high']}/mo · "
-                        f"{info['count']} now available\n"
-                        f"Essex does not publish move-in dates — open to check.",
+                        f"{prop['name']} — {u['label']} available {u['available']}",
+                        f"{u['plan']} · {u['beds']}bd/{u['baths']}ba · {u['sqft']} sqft\n"
+                        f"from ${u['price']}/mo · move-in {u['available']}",
                         url=prop["url"],
                         priority="high",
                     )
-            state[prop["key"]] = {"plans": plans, "total": total}
+            state[prop["key"]] = {
+                "window_ids": sorted(u["id"] for u in matching),
+                "total": len(units),
+                "furthest": furthest,
+            }
         except Exception as exc:  # noqa: BLE001
             log(f"{prop['name']}: FAILED — {exc}")
             health(state, prop["key"], prop["name"], False, str(exc)[:200])
