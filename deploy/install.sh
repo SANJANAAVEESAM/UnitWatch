@@ -27,6 +27,15 @@ if ! command -v chromium >/dev/null && ! command -v chromium-browser >/dev/null;
   apt-get install -y -qq /tmp/chrome.deb >/dev/null
 fi
 
+# A 1GB free-tier box has no swap by default, and Chrome will be killed the
+# first time a page is heavy. One gigabyte of swap costs nothing and turns a
+# hard failure into a slow check.
+if [ "$(free -m | awk '/^Swap:/{print $2}')" = "0" ] && [ ! -f /swapfile ]; then
+  echo "==> adding 1G swap (none present)"
+  fallocate -l 1G /swapfile && chmod 600 /swapfile && mkswap -q /swapfile && swapon /swapfile
+  grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+fi
+
 echo "==> user and directory"
 id -u "$SERVICE_USER" >/dev/null 2>&1 || useradd --system --create-home --shell /usr/sbin/nologin "$SERVICE_USER"
 mkdir -p "$APP_DIR"
@@ -48,7 +57,10 @@ Environment=UNITWATCH_TOPIC=${UNITWATCH_TOPIC:?set UNITWATCH_TOPIC when running 
 ExecStart=/usr/bin/python3 $APP_DIR/watch.py
 # Chrome is the only thing here that can misbehave; cap it rather than let it
 # take the box down.
-MemoryMax=1500M
+# Sized for the smallest free-tier boxes. Chrome is the only thing here that
+# can misbehave, and on a 1GB host an unbounded render takes the machine with
+# it rather than just failing one check.
+MemoryMax=700M
 TimeoutStartSec=180
 
 [Install]

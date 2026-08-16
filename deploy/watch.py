@@ -175,6 +175,15 @@ def fetch_browser(url: str, budget_ms: int = 30000) -> str:
     """
     out = subprocess.run(
         [CHROME, "--headless", "--disable-gpu", "--no-sandbox",
+         # Flags for small hosts. /dev/shm is tiny on most cheap VMs and
+         # containers, and Chrome will crash rather than fall back on its own;
+         # the rest turn off machinery a scraper never uses. Together they take
+         # a page load from roughly half a gigabyte to something a 1GB free-tier
+         # box can serve without swapping itself to death.
+         "--disable-dev-shm-usage", "--disable-extensions",
+         "--disable-background-networking", "--disable-sync",
+         "--disable-default-apps", "--no-first-run", "--mute-audio",
+         "--blink-settings=imagesEnabled=false",
          f"--virtual-time-budget={budget_ms}", "--dump-dom", url],
         capture_output=True, text=True, timeout=budget_ms / 1000 + 45,
     )
