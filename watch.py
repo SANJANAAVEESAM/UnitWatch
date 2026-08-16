@@ -73,6 +73,45 @@ FAILS_BEFORE_ALERT = 3          # consecutive bad runs before crying wolf
 HEARTBEAT_HOURS = 24            # a quiet "still watching" at most this often
 GAP_ALERT_MINUTES = 25          # report a silence longer than this on waking
 
+
+def _ping_url() -> str | None:
+    """A dead-man's switch, if one is configured.
+
+    Everything else here is self-reported, and a process cannot report that it
+    has stopped. If the machine is off, the job unloaded, the disk full or the
+    script broken on import, no alert of ours will ever fire and the resulting
+    silence is indistinguishable from a quiet market.
+
+    So each completed run pings an outside service, and that service is what
+    shouts when the pings stop. healthchecks.io does this on a free tier;
+    anything with the same shape works.
+
+    Optional. Without it everything else still runs, just without the safety
+    net — so the absence of a ping URL is not an error.
+    """
+    env = os.environ.get("UNITWATCH_PING")
+    if env:
+        return env.strip()
+    local = Path(__file__).with_name("ping.txt")
+    if local.exists():
+        text = local.read_text().strip()
+        return text or None
+    return None
+
+
+PING_URL = _ping_url()
+
+
+def ping_alive() -> None:
+    """Tell the outside world this run finished."""
+    if not PING_URL:
+        return
+    try:
+        subprocess.run(["curl", "-sS", "-m", "15", "-o", "/dev/null", PING_URL],
+                       capture_output=True, timeout=25)
+    except Exception as exc:  # noqa: BLE001
+        log(f"  ! dead-man ping failed: {exc}")
+
 # Only Avalon can be filtered by date; see the module docstring.
 WINDOW_START = date(2026, 10, 10)
 WINDOW_END = date(2026, 10, 17)
@@ -569,6 +608,10 @@ def main() -> int:
         log("nothing new")
         maybe_heartbeat(state)
         save_state(state)
+
+    # Last thing, on every path: the run finished. Whatever it found, the
+    # outside world now knows this is still alive.
+    ping_alive()
     return 0
 
 
