@@ -150,10 +150,26 @@ def alertable(units: list[dict], community: str) -> list[tuple[dict, dict | None
     for u in units:
         star = starred(u, community)
         if star and star.get("any_date"):
+            u["_off"] = near_window(u["available"]) or 0
             out.append((u, star))
-        elif in_window(u["available"]) and wanted(u["beds"], u["baths"]):
+            continue
+        off = near_window(u["available"])
+        if off is not None and wanted(u["beds"], u["baths"]):
+            u["_off"] = off
             out.append((u, star))
     return out
+
+
+def when_note(u: dict) -> str:
+    """How this unit sits against the window, in words."""
+    off = u.get("_off") or 0
+    if not off:
+        return ""
+    try:
+        early = date.fromisoformat(u["available"]) < WINDOW_START
+    except (ValueError, TypeError):
+        return ""
+    return f"\n{off} day{'s' if off != 1 else ''} {'before' if early else 'after'} your window."
 
 
 def _ping_url() -> str | None:
@@ -202,9 +218,20 @@ def ping_alive() -> None:
     except Exception as exc:  # noqa: BLE001
         log(f"  ! dead-man ping failed: {exc}")
 
-# Only Avalon can be filtered by date; see the module docstring.
 WINDOW_START = date(2026, 10, 10)
 WINDOW_END = date(2026, 10, 17)
+
+# Days either side of the window that still count, quietly.
+#
+# The window is eight days wide and availability does not oblige it. A flat
+# came free on 7 October — three days early, one bedroom, the right size, the
+# right rent — and nothing was said, because 7 October is not between the 10th
+# and the 17th. Three days is a few nights of overlapping rent or a start date
+# the leasing office moves; it is not a reason to stay silent.
+#
+# So the window is exact and near-misses are near-misses: same alert, lower
+# priority, and the message says how far off it is.
+GRACE_DAYS = 12
 
 # Layouts you do not want to hear about, as (bedrooms, bathrooms). Applied to
 # both landlords: to individual units at Avalon, and to whole floorplans at
@@ -422,6 +449,27 @@ def in_window(iso: str | None) -> bool:
     except ValueError:
         return False
     return WINDOW_START <= d <= WINDOW_END
+
+
+def near_window(iso: str | None) -> int | None:
+    """Days outside the window, or None if further off than the grace band.
+
+    Zero means inside it. A positive number is how many days early or late,
+    which the alert quotes so you can judge it rather than guess.
+    """
+    if not iso:
+        return None
+    try:
+        d = date.fromisoformat(iso)
+    except ValueError:
+        return None
+    if d < WINDOW_START:
+        off = (WINDOW_START - d).days
+    elif d > WINDOW_END:
+        off = (d - WINDOW_END).days
+    else:
+        return 0
+    return off if off <= GRACE_DAYS else None
 
 
 # --------------------------------------------------------------------------
@@ -643,9 +691,10 @@ def main() -> int:
                         + f"{AVALON['name']} — {u['label']} available {u['available']}",
                         f"{u['plan']} · {u['beds']}bd/{u['baths']}ba · {u['sqft']} sqft\n"
                         f"${u['price']}/mo · move-in {u['available']}"
+                        + when_note(u)
                         + ("\nOn your watchlist." if star else ""),
                         url=u["url"],
-                        priority="max" if star else "high",
+                        priority="max" if star else ("high" if not u.get("_off") else "default"),
                     )
             # The horizon matters as much as the count: a window in October is
             # unreachable until a community starts listing that far ahead.
@@ -691,9 +740,10 @@ def main() -> int:
                         + f"{prop['name']} — {u['label']} available {u['available']}",
                         f"{u['plan']} · {u['beds']}bd/{u['baths']}ba · {u['sqft']} sqft\n"
                         f"from ${u['price']}/mo · move-in {u['available']}"
+                        + when_note(u)
                         + ("\nOn your watchlist." if star else ""),
                         url=prop["url"],
-                        priority="max" if star else "high",
+                        priority="max" if star else ("high" if not u.get("_off") else "default"),
                     )
             state[prop["key"]] = {
                 "window_ids": sorted(u["id"] for u, _ in picks),
